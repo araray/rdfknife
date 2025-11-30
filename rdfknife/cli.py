@@ -27,6 +27,8 @@ from .core import (
     wordnet_synsets_for_lemma,
     wordnet_synonyms_for_lemma,
     owl_entities,
+    wordnet_all_lemma_synonyms,
+    detect_wordnet_schema,
 )
 from .shell import start_shell
 
@@ -460,6 +462,97 @@ def wn_synonyms_cmd(
         ]
         table.add_row(syn, ", ".join(ids))
     console.print(table)
+
+
+@cli.command("wn-export-synonyms")
+@click.option(
+    "--lang",
+    type=str,
+    default=None,
+    help="Lexical form language tag to filter by (e.g. 'pt', 'en').",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["tsv", "json"], case_sensitive=False),
+    default="tsv",
+    show_default=True,
+    help="Output format.",
+)
+@click.option(
+    "-o",
+    "--output",
+    "output_path",
+    type=click.Path(dir_okay=False, writable=True, path_type=Path),
+    default=None,
+    help="Output file. If omitted, write to stdout.",
+)
+@pass_state
+def wn_export_synonyms_cmd(
+    state: AppState,
+    lang: Optional[str],
+    output_format: str,
+    output_path: Optional[Path],
+) -> None:
+    """Export all lemmas with their synonyms from a WordNet RDF graph."""
+    graph = _require_graph(state)
+
+    console.log("[bold cyan]Starting synonym export...[/bold cyan]")
+
+    try:
+        mapping = wordnet_all_lemma_synonyms(
+            graph,
+            lang=lang,
+            progress=lambda msg: console.log(f"[cyan]{msg}[/cyan]"),
+        )
+    except RDFToolError as exc:
+        # You now see progress *and* then the error, not just a dead hang.
+        raise click.ClickException(str(exc)) from exc
+
+    console.log(
+        f"[bold cyan]Synonym extraction complete for {len(mapping)} lemmas.[/bold cyan]"
+    )
+
+    if output_format.lower() == "json":
+        text = json.dumps(mapping, ensure_ascii=False, indent=2)
+    else:
+        # TSV: one row per (lemma, synonym) pair
+        lines: list[str] = []
+        for lemma in sorted(mapping.keys()):
+            for syn in mapping[lemma]:
+                lines.append(f"{lemma}\t{syn}")
+        text = "\n".join(lines)
+
+    if output_path is None:
+        click.echo(text)
+    else:
+        output_path.write_text(text, encoding="utf8")
+        console.print(
+            f"[green]Wrote {len(mapping)} lemmas to {output_path} "
+            f"({output_format.upper()}).[/green]"
+        )
+
+
+@cli.command("wn-debug-schema")
+@pass_state
+def wn_debug_schema_cmd(state: AppState) -> None:
+    """Debug WordNet schema detection on the current graph."""
+    graph = _require_graph(state)
+    schema = detect_wordnet_schema(graph)
+
+    table = Table(title="WordNet schema detection")
+    table.add_column("Field")
+    table.add_column("Predicate URI")
+
+    table.add_row("lexical_form", str(schema.lexical_form or "—"))
+    table.add_row("word", str(schema.word or "—"))
+    table.add_row("contains_word_sense", str(schema.contains_word_sense or "—"))
+    table.add_row("in_synset", str(schema.in_synset or "—"))
+    table.add_row("gloss", str(schema.gloss or "—"))
+    table.add_row("synset_id", str(schema.synset_id or "—"))
+
+    console.print(table)
+    console.print(f"is_detected = [bold]{schema.is_detected}[/bold]")
 
 
 @cli.command("owl-entities")

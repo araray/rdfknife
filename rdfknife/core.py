@@ -1,9 +1,10 @@
 # rdfknife/core.py
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Callable
 
 import logging
 
@@ -42,17 +43,26 @@ class WordNetSchema:
     in_synset: Optional[URIRef] = None
 
     @property
-    def is_detected(self) -> bool:
-        """Return True if this graph looks like W3C WordNet RDF.
+    def has_synset_link(self) -> bool:
+        """True if we have *some* Synset–WordSense link predicate."""
+        return self.contains_word_sense is not None or self.in_synset is not None
 
-        This is a heuristic: we require at least lexicalForm, containsWordSense
-        and word to be present in the graph.
+    @property
+    def is_detected(self) -> bool:
+        """Heuristic: graph is 'WordNet-like enough' for our algorithms.
+
+        For OpenWordnet‑PT and W3C WordNet RDF, we expect at least:
+
+        - lexicalForm (Word → lexical form literal)
+        - word (WordSense → Word)
+        - some synset/sense link: containsWordSense or inSynset :contentReference[oaicite:1]{index=1}
         """
         return (
             self.lexical_form is not None
-            and self.contains_word_sense is not None
             and self.word is not None
+            and self.has_synset_link
         )
+
 
 
 @dataclass
@@ -514,15 +524,8 @@ def remove_triple(
 
 
 def _predicates_by_local_name(graph: Graph, local_name: str) -> List[URIRef]:
-    """Find all predicates with the given local name.
-
-    Args:
-        graph: RDF graph.
-        local_name: Local name to match (e.g. 'lexicalForm').
-
-    Returns:
-        List of predicate URIs.
-    """
+    """Find all predicates with the given local name (case-insensitive)."""
+    target = local_name.lower()
     preds: set[URIRef] = set()
     for _, p, _ in graph:
         if not isinstance(p, URIRef):
@@ -530,13 +533,12 @@ def _predicates_by_local_name(graph: Graph, local_name: str) -> List[URIRef]:
         try:
             _, ln = split_uri(p)
         except ValueError:
-            # Fallback: use fragment or last path segment
             txt = str(p)
             if "#" in txt:
                 ln = txt.rsplit("#", 1)[1]
             else:
                 ln = txt.rsplit("/", 1)[-1]
-        if ln == local_name:
+        if ln.lower() == target:
             preds.add(p)
     return sorted(preds, key=str)
 
@@ -544,16 +546,9 @@ def _predicates_by_local_name(graph: Graph, local_name: str) -> List[URIRef]:
 def detect_wordnet_schema(graph: Graph) -> WordNetSchema:
     """Detect WordNet RDF schema predicates in a graph.
 
-    This follows the W3C RDF/OWL representation of WordNet, which defines
-    classes such as Synset, Word, WordSense and predicates like lexicalForm,
-    containsWordSense, word, gloss, synsetId, hyponymOf and hypernymOf. :contentReference[oaicite:1]{index=1}
-
-    Args:
-        graph: RDF graph.
-
-    Returns:
-        A `WordNetSchema` instance. Its `is_detected` property indicates
-        whether the graph looks WordNet-like.
+    This follows the W3C/OWN-PT RDF/OWL schema: Synset, Word, WordSense
+    with properties lexicalForm, word, containsWordSense, gloss, synsetId,
+    hyponymOf, hypernymOf, inSynset. :contentReference[oaicite:2]{index=2}
     """
     def first_or_none(preds: List[URIRef]) -> Optional[URIRef]:
         return preds[0] if preds else None
@@ -811,3 +806,147 @@ def owl_entities(graph: Graph) -> Dict[str, List[URIRef]]:
         "annotation_properties": sorted(ann_props, key=str),
         "individuals": sorted(individuals, key=str),
     }
+
+def wordnet_all_lemma_synonyms(
+    graph: Graph,
+    lang: Optional[str] = None,
+    progress: Optional[Callable[[str], None]] = None,
+) -> Dict[str, List[str]]:
+    """Compute synonyms for all lemmas in a WordNet RDF graph.
+
+    This follows the Synset–WordSense–Word structure used by the W3C
+    WordNet RDF recommendation and OpenWordnet‑PT: Synset is linked
+    to WordSense via containsWordSense or inSynset, WordSense to Word
+    via word, and Word to its lexical form via lexicalForm. :contentReference[oaicite:3]{index=3}
+
+    For each synset, all lemmas in that synset are considered mutual
+    synonyms. The result merges across all senses: a polysemous lemma
+    will have the union of synonyms from all its synsets.
+
+    Args:
+        graph: RDF graph containing WordNet/OWN-PT data.
+        lang: Optional language code (e.g. "pt", "en"). If provided,
+            only lexicalForm literals with that language tag are used.
+        progress: Optional callback taking a human-readable progress
+            message; used by the CLI to report progress.
+
+    Returns:
+        Mapping lemma -> sorted list of unique synonyms (may be empty).
+
+    Raises:
+        RDFToolError: If the graph does not look like a WordNet RDF
+            graph, or if no lexicalForm literals are found for the
+            requested language.
+    """
+    def log(msg: str) -> None:
+        if progress is not None:
+            progress(msg)
+
+    schema = detect_wordnet_schema(graph)
+    if not schema.is_detected:
+        raise RDFToolError(
+            "Graph does not look like W3C/OWN-PT WordNet RDF "
+            "(lexicalForm/word plus a synset–sense link predicate "
+            "not detected)."
+        )
+
+    if schema.lexical_form is None or schema.word is None:
+        raise RDFToolError(
+            "WordNet schema is missing lexicalForm or word predicate."
+        )
+
+    log("Step 1/3: indexing Words via lexicalForm ...")
+
+    # 1. Word -> lemma (language-filtered)
+    word_to_lemma: Dict[URIRef, str] = {}
+    for word_uri, _, lit in graph.triples((None, schema.lexical_form, None)):
+        if not isinstance(lit, Literal):
+            continue
+        if not isinstance(word_uri, URIRef):
+            continue
+        if lang is not None and lit.language != lang:
+            continue
+        word_to_lemma[word_uri] = str(lit)
+
+    if not word_to_lemma:
+        msg = "No Word lexicalForm literals found"
+        if lang is not None:
+            msg += f" for language {lang!r}"
+        raise RDFToolError(msg + ".")
+
+    log(f"  - collected {len(word_to_lemma)} Word nodes with lexicalForm.")
+
+    # 2. WordSense -> Word
+    log("Step 2/3: indexing WordSenses via word ...")
+
+    ws_to_word: Dict[URIRef, URIRef] = {}
+    for ws_uri, _, word_uri in graph.triples((None, schema.word, None)):
+        if not isinstance(ws_uri, URIRef) or not isinstance(word_uri, URIRef):
+            continue
+        if word_uri not in word_to_lemma:
+            continue
+        ws_to_word[ws_uri] = word_uri
+
+    log(f"  - mapped {len(ws_to_word)} WordSense nodes to Words.")
+
+    # 3. Synset -> WordSense (containsWordSense / inSynset)
+    log("Step 3/3: grouping WordSenses by Synset ...")
+
+    synset_to_senses: Dict[URIRef, set[URIRef]] = defaultdict(set)
+
+    if schema.contains_word_sense is not None:
+        for synset_uri, _, ws_uri in graph.triples(
+            (None, schema.contains_word_sense, None)
+        ):
+            if not isinstance(synset_uri, URIRef) or not isinstance(ws_uri, URIRef):
+                continue
+            synset_to_senses[synset_uri].add(ws_uri)
+
+    if schema.in_synset is not None:
+        for ws_uri, _, synset_uri in graph.triples(
+            (None, schema.in_synset, None)
+        ):
+            if not isinstance(synset_uri, URIRef) or not isinstance(ws_uri, URIRef):
+                continue
+            synset_to_senses[synset_uri].add(ws_uri)
+
+    # Synset -> lemmas
+    synset_to_lemmas: Dict[URIRef, List[str]] = defaultdict(list)
+    for synset_uri, senses in synset_to_senses.items():
+        for ws_uri in senses:
+            word_uri = ws_to_word.get(ws_uri)
+            if word_uri is None:
+                continue
+            lemma = word_to_lemma.get(word_uri)
+            if lemma is None:
+                continue
+            synset_to_lemmas[synset_uri].append(lemma)
+
+    # 4. Lemma -> set of synonyms
+    lemma_synonyms: Dict[str, set[str]] = defaultdict(set)
+    all_lemmas = set(word_to_lemma.values())
+
+    for lemmas in synset_to_lemmas.values():
+        # Deduplicate per-synset while preserving order
+        seen_local: set[str] = set()
+        unique_lemmas: List[str] = []
+        for lemma in lemmas:
+            if lemma in seen_local:
+                continue
+            seen_local.add(lemma)
+            unique_lemmas.append(lemma)
+
+        for i, lemma in enumerate(unique_lemmas):
+            for j, other in enumerate(unique_lemmas):
+                if i == j:
+                    continue
+                lemma_synonyms[lemma].add(other)
+
+    # 5. Normalize: lemma -> sorted list, include lemmas without synonyms
+    result: Dict[str, List[str]] = {}
+    for lemma in sorted(all_lemmas):
+        syns = sorted(lemma_synonyms.get(lemma, set()))
+        result[lemma] = syns
+
+    log(f"Done: computed synonyms for {len(result)} lemmas.")
+    return result

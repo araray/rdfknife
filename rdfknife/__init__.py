@@ -22,6 +22,7 @@ from .core import (
     wordnet_synsets_for_lemma,
     wordnet_synonyms_for_lemma,
     owl_entities,
+    wordnet_all_lemma_synonyms,
 )
 
 __all__ = [
@@ -38,6 +39,7 @@ __all__ = [
     "wordnet_synsets_for_lemma",
     "wordnet_synonyms_for_lemma",
     "owl_entities",
+    "wordnet_all_lemma_synonyms",
     "__version__",
 ]
 

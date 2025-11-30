@@ -1,0 +1,140 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+# requires = ["setuptools>=70.0", "wheel"]
+# build-backend = "setuptools.build_meta"
+
+[project]
+name = "rdfknife"
+# Version is dynamically read from rdfknife/__init__.py: __version__
+dynamic = ["version"]
+
+description = "Swiss-knife CLI and library for RDF graphs (WordNet RDF & OWL 2 on RDF)."
+readme = "README.md"
+requires-python = ">=3.11"
+
+license = { text = "MIT" }
+
+authors = [
+  { name = "Araray Velho", email = "araray@gmail.com" },
+]
+
+keywords = [
+  "rdf",
+  "rdflib",
+  "wordnet",
+  "owl",
+  "ontology",
+  "semantic-web",
+  "cli",
+]
+
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: Text Processing :: Linguistic",
+  "Environment :: Console",
+]
+
+dependencies = [
+  # Core CLI + TUI stack
+  "click>=8.1",
+  "rich>=13.7",
+  # Package name on PyPI is `prompt-toolkit`; import is `prompt_toolkit`.
+  "prompt-toolkit>=3.0",  # interactive shell :contentReference[oaicite:2]{index=2}
+
+  # RDF engine
+  "rdflib>=7.0",          # RDF parsing, SPARQL, JSON-LD, etc. :contentReference[oaicite:3]{index=3}
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-cov>=4.0",
+  "mypy>=1.10",
+  "ruff>=0.5",
+  "black>=24.4",
+  "types-click>=7.1.8.3",
+]
+
+# If you ever add docs:
+docs = [
+  "sphinx>=7.0",
+  "furo>=2024.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/araray/rdfknife"
+Source   = "https://github.com/araray/rdfknife"
+Issues   = "https://github.com/araray/rdfknife/issues"
+
+[project.scripts]
+rdfknife = "rdfknife.cli:main"
+
+[tool.hatch.version]
+# Single-source the version from rdfknife/__init__.py
+path = "rdfknife/__init__.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "rdfknife/",
+  "tests/",
+  "README.md",
+  "USAGE.md",
+  "requirements.txt",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["rdfknife"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.black]
+line-length = 88
+target-version = ["py311", "py312"]
+skip-string-normalization = false
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+select = [
+  "E",   # pycodestyle errors
+  "W",   # pycodestyle warnings
+  "F",   # pyflakes
+  "I",   # isort
+  "B",   # bugbear
+  "UP",  # pyupgrade
+]
+ignore = [
+  "E203",  # Black-compatible slice spacing
+]
+
+[tool.ruff.isort]
+known-first-party = ["rdfknife"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_configs = true
+ignore_missing_imports = true
+strict = false
+mypy_path = ["rdfknife"]
+
+[tool.coverage.run]
+branch = true
+source = ["rdfknife"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
