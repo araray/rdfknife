@@ -3,8 +3,8 @@
 A small but sharp Swiss‑army knife for RDF graphs, with first‑class support
 for:
 
-- W3C RDF/OWL representation of WordNet :contentReference[oaicite:5]{index=5}
-- OWL 2 ontologies mapped to RDF graphs :contentReference[oaicite:6]{index=6}
+- W3C RDF/OWL representation of WordNet 
+- OWL 2 ontologies mapped to RDF graphs 
 
 Built on top of [`rdflib`](https://rdflib.readthedocs.io/), `click`, `rich`,
 and `prompt_toolkit`.
@@ -22,7 +22,7 @@ and `prompt_toolkit`.
   - Remove triples by pattern
 - Export:
   - JSON triple list (lossless)
-  - JSON‑LD (via rdflib’s JSON‑LD serializer) :contentReference[oaicite:7]{index=7}
+  - JSON‑LD (via rdflib’s JSON‑LD serializer) 
 - WordNet helpers (W3C WordNet RDF):
   - Detect WordNet schema predicates
   - Lemma → synsets (with glosses and IDs)
