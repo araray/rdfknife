@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Callable
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Callable, Set
 
 import logging
 
@@ -60,7 +60,7 @@ class WordNetSchema:
         return (
             self.lexical_form is not None
             and self.word is not None
-            and self.has_synset_link
+            and (self.contains_word_sense is not None or self.in_synset is not None)
         )
 
 
@@ -543,28 +543,133 @@ def _predicates_by_local_name(graph: Graph, local_name: str) -> List[URIRef]:
     return sorted(preds, key=str)
 
 
-def detect_wordnet_schema(graph: Graph) -> WordNetSchema:
-    """Detect WordNet RDF schema predicates in a graph.
+def _infer_lexical_form_predicate(
+    graph: Graph,
+    word_predicate: URIRef,
+) -> Optional[URIRef]:
+    """Heuristically infer the lemma/lexical-form predicate for Word nodes.
 
-    This follows the W3C/OWN-PT RDF/OWL schema: Synset, Word, WordSense
-    with properties lexicalForm, word, containsWordSense, gloss, synsetId,
-    hyponymOf, hypernymOf, inSynset. :contentReference[oaicite:2]{index=2}
+    We assume `word_predicate` is the WordSense → Word property
+    (e.g. wn:word, own:word).
+
+    Algorithm:
+
+    1. Collect all Word nodes as objects of (?ws word_predicate ?w).
+    2. For those Word nodes, inspect triples (w, p, lit) where:
+        * lit is a Literal
+        * p is in the same namespace as word_predicate
+    3. Return the predicate p that appears most often.
+
+    This works for variants like OWN where the lexical form property may
+    not literally be named 'lexicalForm', but still lives on Word nodes
+    in the same namespace as `word`. :contentReference[oaicite:1]{index=1}
     """
-    def first_or_none(preds: List[URIRef]) -> Optional[URIRef]:
+    # Derive the namespace of the `word_predicate`
+    base = str(word_predicate)
+    if "#" in base:
+        base = base.rsplit("#", 1)[0] + "#"
+    else:
+        base = base.rsplit("/", 1)[0] + "/"
+
+    # 1. Collect Word nodes (objects of WordSense → Word predicate)
+    words: Set[URIRef] = set()
+    for ws, _, w in graph.triples((None, word_predicate, None)):
+        if isinstance(w, URIRef):
+            words.add(w)
+
+    if not words:
+        logger.info(
+            "Cannot infer lexical form predicate: no Word nodes found via %s",
+            word_predicate,
+        )
+        return None
+
+    # 2. Count literal-valued predicates on those Word nodes
+    counts: Dict[URIRef, int] = defaultdict(int)
+    for w in words:
+        for _, p, o in graph.triples((w, None, None)):
+            if not isinstance(p, URIRef) or not isinstance(o, Literal):
+                continue
+            if not str(p).startswith(base):
+                # ignore properties outside the OWN schema namespace
+                continue
+            counts[p] += 1
+
+    if not counts:
+        logger.info(
+            "Cannot infer lexical form predicate: no literal-valued "
+            "predicates on Word nodes in namespace %s",
+            base,
+        )
+        return None
+
+    best_pred, best_n = max(counts.items(), key=lambda kv: kv[1])
+    logger.info(
+        "Heuristically inferred lexical_form predicate as %s "
+        "from %d occurrences on Word nodes",
+        best_pred,
+        best_n,
+    )
+    return best_pred
+
+
+def _predicates_by_local_name(graph: Graph, local_name: str) -> list[URIRef]:
+    """Find all predicates whose local name (after '/' or '#') matches."""
+    target = local_name.lower()
+    preds: set[URIRef] = set()
+    for _, p, _ in graph.triples((None, None, None)):
+        if not isinstance(p, URIRef):
+            continue
+        txt = str(p)
+        if "#" in txt:
+            ln = txt.rsplit("#", 1)[1]
+        else:
+            ln = txt.rstrip("/").rsplit("/", 1)[-1]
+        if ln.lower() == target:
+            preds.add(p)
+    return sorted(preds, key=str)
+
+
+def detect_wordnet_schema(graph: Graph) -> "WordNetSchema":
+    """Detect WordNet/OWN-style schema predicates in a graph.
+
+    First, we try exact local-name matching (`lexicalForm`, `word`,
+    `containsWordSense`, `inSynset`) as in the W3C WordNet RDF spec. :contentReference[oaicite:2]{index=2}
+
+    If `lexicalForm` is not found but `word` is, we heuristically infer the
+    lemma predicate by looking for the most frequent literal-valued property
+    attached to Word nodes (objects of the `word` predicate) in the same
+    namespace as `word`. This covers newer OWN distributions where the
+    lexical form property is renamed but structurally identical. :contentReference[oaicite:3]{index=3}
+    """
+
+    def first_or_none(preds: list[URIRef]) -> Optional[URIRef]:
         return preds[0] if preds else None
 
-    schema = WordNetSchema(
-        lexical_form=first_or_none(_predicates_by_local_name(graph, "lexicalForm")),
-        contains_word_sense=first_or_none(
-            _predicates_by_local_name(graph, "containsWordSense")
-        ),
-        word=first_or_none(_predicates_by_local_name(graph, "word")),
-        gloss=first_or_none(_predicates_by_local_name(graph, "gloss")),
-        synset_id=first_or_none(_predicates_by_local_name(graph, "synsetId")),
-        hyponym_of=first_or_none(_predicates_by_local_name(graph, "hyponymOf")),
-        hypernym_of=first_or_none(_predicates_by_local_name(graph, "hypernymOf")),
-        in_synset=first_or_none(_predicates_by_local_name(graph, "inSynset")),
+    lexical_form = first_or_none(_predicates_by_local_name(graph, "lexicalForm"))
+    word = first_or_none(_predicates_by_local_name(graph, "word"))
+    contains_word_sense = first_or_none(
+        _predicates_by_local_name(graph, "containsWordSense")
     )
+    in_synset = first_or_none(_predicates_by_local_name(graph, "inSynset"))
+    gloss = first_or_none(_predicates_by_local_name(graph, "gloss"))
+    synset_id = first_or_none(_predicates_by_local_name(graph, "synsetId"))
+
+    schema = WordNetSchema(
+        lexical_form=lexical_form,
+        word=word,
+        contains_word_sense=contains_word_sense,
+        in_synset=in_synset,
+        gloss=gloss,
+        synset_id=synset_id,
+    )
+
+    # 🔧 NEW: heuristic fallback for lexical_form
+    if schema.lexical_form is None and schema.word is not None:
+        inferred = _infer_lexical_form_predicate(graph, schema.word)
+        if inferred is not None:
+            schema.lexical_form = inferred
+
     logger.debug("Detected WordNet schema: %r", schema)
     return schema
 
